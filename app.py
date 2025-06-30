@@ -16,18 +16,23 @@ os.makedirs(db_dir, exist_ok=True)
 db_path = os.path.join(db_dir, "grid_assessment.db")
 
 # 加载用户认证配置
-with open('config.yaml') as file:
+# 明确指定使用 utf-8 编码打开文件
+with open('config.yaml', encoding='utf-8') as file:
     config = yaml.load(file, Loader=SafeLoader)
 
+# 移除 pre_authorized 参数
 authenticator = stauth.Authenticate(
     config['credentials'],
     config['cookie']['name'],
     config['cookie']['key'],
-    config['cookie']['expiry_days'],
-    config['preauthorized']
+    config['cookie']['expiry_days']
 )
 
-name, authentication_status, username = authenticator.login('登录', 'main')
+# 使用 sidebar
+name, authentication_status, username = authenticator.login('登录', 'sidebar')
+
+# 或者使用 unrendered
+# name, authentication_status, username = authenticator.login('登录', 'unrendered')
 
 if authentication_status:
     authenticator.logout('退出登录', 'main')
@@ -189,6 +194,7 @@ if authentication_status:
     
     # 初始化数据库
     def init_database():
+        print(f"Database path: {db_path}")  # 添加日志输出
         conn = get_db_connection()
         if conn is None:
             return
@@ -247,7 +253,7 @@ if authentication_status:
         finally:
             if conn:
                 conn.close()
-    
+
     def import_data(file):
         """导入数据时支持列名映射，解决缺少必要列的问题"""
         if file.name.endswith('.csv'):
@@ -294,37 +300,46 @@ if authentication_status:
         # 获取文件中的列名
         file_columns = df.columns.tolist()
         
-        # 列名映射设置界面
-        st.subheader("列名映射设置")
-        st.info("请将文件中的列映射到系统所需的字段，未映射的字段将设为0")
-        
-        # 映射必须的字段：name, area, date
+        # 自动映射基本信息
         mapped_fields = {}
+        mapping_rules = {
+            'name': ['姓名', 'Name'],
+            'area': ['辖区', 'Area'],
+            'date': ['评估日期', 'Date']
+        }
+        for field, candidates in mapping_rules.items():
+            for candidate in candidates:
+                if candidate in file_columns:
+                    mapped_fields[field] = candidate
+                    break
+            else:
+                mapped_fields[field] = '无匹配列' if field in ['name', 'area'] else '无匹配列（设为0）'
         
-        # 映射 name 列
+        # 自动映射评估维度列
+        for dim, db_col in dim_to_db_col.items():
+            for col in file_columns:
+                if dim in col:
+                    mapped_fields[db_col] = col
+                    break
+            else:
+                mapped_fields[db_col] = '无匹配列（设为0）'
+        
+        # 显示自动映射结果
+        st.subheader("自动映射结果")
         st.write("### 基本信息映射")
-        name_options = ['无匹配列'] + file_columns
-        mapped_fields['name'] = st.selectbox("映射到 '姓名' 字段", name_options, key="map_name")
+        st.write(f"姓名: {mapped_fields['name']}")
+        st.write(f"辖区: {mapped_fields['area']}")
+        st.write(f"评估日期: {mapped_fields['date']}")
         
-        # 映射 area 列
-        area_options = ['无匹配列'] + file_columns
-        mapped_fields['area'] = st.selectbox("映射到 '辖区' 字段", area_options, key="map_area")
-        
-        # 映射 date 列
-        date_options = ['无匹配列'] + file_columns
-        mapped_fields['date'] = st.selectbox("映射到 '评估日期' 字段", date_options, key="map_date")
-        
-        # 映射评估维度列
         st.write("### 能力评估维度映射")
         for dim, db_col in dim_to_db_col.items():
-            col_options = ['无匹配列（设为0）'] + file_columns
-            mapped_fields[db_col] = st.selectbox(f"映射到 '{dim}' 字段", col_options, key=f"map_{db_col}")
+            st.write(f"{dim}: {mapped_fields[db_col]}")
         
         # 确认映射
         if 'confirm_import' not in st.session_state:
             st.session_state.confirm_import = False
         
-        if st.button("确认映射并导入", key="confirm_import_button"):
+        if st.button("确认自动映射并导入", key="confirm_import_button"):
             st.session_state.confirm_import = True
         
         if st.session_state.confirm_import:
@@ -425,7 +440,43 @@ if authentication_status:
                 )
             rows = cursor.fetchall()
             columns = [desc[0] for desc in cursor.description]
-            df = pd.DataFrame(rows, columns=columns)
+
+            # 定义英文列名到中文列名的映射
+            column_mapping = {
+                "id": "评估记录ID",
+                "leader_id": "网格长ID",
+                "date": "评估日期",
+                "professional_skill": "专业技术能力",
+                "index_mastery": "指标掌控能力",
+                "management_execution": "管理执行能力",
+                "communication_coordination": "沟通协调能力",
+                "marketing_ability": "市场营销能力",
+                "long_work_order_ratio": "超长工单占比",
+                "reminder_rate": "催单率",
+                "on_site_timeliness": "上门及时率",
+                "repeat_complaint_rate": "重复投诉率",
+                "complaints_per_ten_thousand": "万投比",
+                "contact_service_satisfaction": "触点服务客户满意占比",
+                "poor_quality_customer_ratio": "质差客户占比",
+                "home_broadband_interrupt_duration": "家宽单用户中断时长",
+                "home_broadband_weak_light_rate": "家宽弱光率",
+                "task_support_timeliness": "任务工单支撑及时率",
+                "handover_rate": "交班交底率",
+                "terminal_inventory": "终端盘点",
+                "personnel_qualified_rate": "人员达标率",
+                "low_sales_ratio": "低销占比",
+                "business_opportunity_conversion_rate": "商机转化率",
+                "yuanbao_completion_rate": "元宝完成率",
+                "terminal_revenue": "终端收入",
+                "import_date": "导入日期",
+                "name": "网格长姓名",
+                "area": "辖区"
+            }
+
+            # 将英文列名转换为中文列名
+            chinese_columns = [column_mapping.get(col, col) for col in columns]
+
+            df = pd.DataFrame(rows, columns=chinese_columns)
             return df
         except Exception as e:
             st.error(f"导出数据失败: {e}")
@@ -664,82 +715,93 @@ if authentication_status:
                 conn.close()
     
     # 主界面内容
-    if 'selected_name' in st.session_state and st.session_state.selected_name:
-        selected_leader = next((leader for leader in all_leaders if leader["name"] == st.session_state.selected_name), None)
-        if selected_leader:
-            leader_id = selected_leader["id"]
-            assessments = get_leader_assessments(leader_id)
-    
-            if assessments:
-                # 找到对应日期的评估记录，若无则使用最新记录
-                selected_assessment = next(
-                    (a for a in assessments if a["date"] == selected_date),
-                    assessments[0]
-                )
-    
-                st.subheader(f"网格长: {selected_leader['name']} - {selected_leader['area']}")
-                st.subheader(f"评估日期: {selected_assessment['date']}")
-    
-                # 显示评估分数
-                st.subheader("能力评估分数")
-                col1, col2 = st.columns(2)
-                for i, dim in enumerate(DIMENSIONS):
-                    col = col1 if i < len(DIMENSIONS)/2 else col2
-                    with col:
-                        score = selected_assessment.get(dim_to_db_col[dim], 0)
-                        st.metric(dim, f"{score:.2f}分")
-    
-                # 计算综合得分
-                scores = {dim: selected_assessment.get(dim_to_db_col[dim], 0) for dim in DIMENSIONS}
+if 'selected_name' in st.session_state and st.session_state.selected_name:
+    selected_leader = next((leader for leader in all_leaders if leader["name"] == st.session_state.selected_name), None)
+    if selected_leader:
+        leader_id = selected_leader["id"]
+        assessments = get_leader_assessments(leader_id)
+
+        if assessments:
+            # 找到对应日期的评估记录，若无则使用最新记录
+            selected_assessment = next(
+                (a for a in assessments if a["date"] == selected_date),
+                assessments[0]
+            )
+
+            st.subheader(f"网格长: {selected_leader['name']} - {selected_leader['area']}")
+            st.subheader(f"评估日期: {selected_assessment['date']}")
+
+            # 显示评估分数
+            st.subheader("能力评估分数")
+            col1, col2 = st.columns(2)
+            for i, dim in enumerate(DIMENSIONS):
+                col = col1 if i < len(DIMENSIONS)/2 else col2
+                with col:
+                    score = selected_assessment.get(dim_to_db_col[dim], 0)
+                    st.metric(dim, f"{score:.2f}分")
+
+            # 计算综合得分
+            scores = {dim: selected_assessment.get(dim_to_db_col[dim], 0) for dim in DIMENSIONS}
+            total_score = calculate_total_score(scores, WEIGHTS, DIMENSIONS)
+
+            st.subheader(f"综合得分: {total_score:.2f}分")
+
+            # 显示评估等级
+            grade = "优秀" if total_score >= THRESHOLDS["优秀"] else \
+                    "良好" if total_score >= THRESHOLDS["良好"] else \
+                    "合格" if total_score >= THRESHOLDS["合格"] else "待改进"
+            st.subheader(f"评估等级: {grade}")
+
+            # 显示全量网格分值排名对比
+            all_assessments = get_all_leaders_assessments()
+            all_scores = []
+            for assessment in all_assessments:
+                scores = {dim: assessment.get(dim_to_db_col[dim], 0) for dim in DIMENSIONS}
                 total_score = calculate_total_score(scores, WEIGHTS, DIMENSIONS)
-    
-                st.subheader(f"综合得分: {total_score:.2f}分")
-    
-                # 显示评估等级
-                grade = "优秀" if total_score >= THRESHOLDS["优秀"] else \
-                        "良好" if total_score >= THRESHOLDS["良好"] else \
-                        "合格" if total_score >= THRESHOLDS["合格"] else "待改进"
-                st.subheader(f"评估等级: {grade}")
-    
-                # 显示全量网格分值排名对比
-                all_assessments = get_all_leaders_assessments()
-                all_scores = []
-                for assessment in all_assessments:
-                    scores = {dim: assessment.get(dim_to_db_col[dim], 0) for dim in DIMENSIONS}
-                    total_score = calculate_total_score(scores, WEIGHTS, DIMENSIONS)
-                    all_scores.append({
-                        "姓名": assessment['name'],
-                        "辖区": assessment['area'],
-                        "综合得分": total_score,
-                        "评估等级": "优秀" if total_score >= THRESHOLDS["优秀"] else
-                                  "良好" if total_score >= THRESHOLDS["良好"] else
-                                  "合格" if total_score >= THRESHOLDS["合格"] else "待改进"
-                    })
-    
-                # 按综合得分排序
-                all_scores.sort(key=lambda x: x["综合得分"], reverse=True)
-                # 添加排名列
-                for i, score_info in enumerate(all_scores, start=1):
-                    score_info["排名"] = i
-    
-                st.subheader("全量网格分值排名对比")
-                df = pd.DataFrame(all_scores)
-                # 高亮显示选中的网格长
-                def highlight_selected(s):
-                    if s["姓名"] == selected_leader["name"]:
-                        return ['background-color: yellow'] * len(s)
-                    return [''] * len(s)
-                st.dataframe(df.style.apply(highlight_selected, axis=1))
-    
-                # 显示网格具体得分结果
-                st.subheader("网格具体得分结果")
-                st.write(pd.DataFrame({
-                    "维度": DIMENSIONS,
-                    "得分": [selected_assessment.get(dim_to_db_col[dim], 0) for dim in DIMENSIONS]
-                }))
+                all_scores.append({
+                    "姓名": assessment['name'],
+                    "辖区": assessment['area'],
+                    "综合得分": total_score,
+                    "评估等级": "优秀" if total_score >= THRESHOLDS["优秀"] else
+                              "良好" if total_score >= THRESHOLDS["良好"] else
+                              "合格" if total_score >= THRESHOLDS["合格"] else "待改进"
+                })
+
+            # 按综合得分排序
+            all_scores.sort(key=lambda x: x["综合得分"], reverse=True)
+            # 添加排名列
+            for i, score_info in enumerate(all_scores, start=1):
+                score_info["排名"] = i
+
+            st.subheader("全量网格分值排名对比")
+            df = pd.DataFrame(all_scores)
+            # 高亮显示选中的网格长
+            def highlight_selected(s):
+                if s["姓名"] == selected_leader["name"]:
+                    return ['background-color: yellow'] * len(s)
+                return [''] * len(s)
+            st.dataframe(df.style.apply(highlight_selected, axis=1))
+
+            # 显示网格具体得分结果
+            st.subheader("网格具体得分结果")
+            st.write(pd.DataFrame({
+                "维度": DIMENSIONS,
+                "得分": [selected_assessment.get(dim_to_db_col[dim], 0) for dim in DIMENSIONS]
+            }))
+
+            # 添加低分值原因和提升建议
+            low_score_threshold = 60  # 低分值阈值
+            low_score_dimensions = [dim for dim in DIMENSIONS if scores[dim] < low_score_threshold]
+
+            if low_score_dimensions:
+                st.subheader("低分值原因及提升建议")
+                for dim in low_score_dimensions:
+                    st.write(f"### {dim}（得分: {scores[dim]:.2f}分）")
+                    st.write("**低分值原因**：该维度得分较低，可能在相关业务能力上存在不足。")
+                    st.write("**提升建议**：")
+                    for tip in IMPROVEMENT_TIPS[dim]:
+                        st.write(f"- {tip}")
             else:
-                st.warning("该网格长暂无评估数据。")
+                st.success("所有维度得分均高于阈值，表现优秀！")
         else:
-            st.warning("未找到选中的网格长数据。")
-    else:
-        st.info("请在侧边栏选择网格长。")
+            st.warning("该网格长暂无评估数据。")
