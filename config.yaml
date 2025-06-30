@@ -1,0 +1,11 @@
+credentials:
+  usernames:
+    admin:
+      name: 超级管理员
+      password: $2b$12$o8pevbnymGWWDQxyy.9/S.0npcWSOEo8SuACZdAEhDHbbkCR3UnEy
+cookie:
+  name: streamlit_auth
+  key: abcdefghijk
+  expiry_days: 90
+preauthorized:
+  emails: [2212240760@qq.com]
