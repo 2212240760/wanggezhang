@@ -1,0 +1,14 @@
+name: DESKTOP-KEAGMJO
+on: [push, pull_request]
+
+jobs:
+  your-job-name:
+    # 指定自托管运行器
+    runs-on: self-hosted
+    
+    # 作业中的其他配置（如步骤、环境等）
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      - name: Run custom script
+        run: python your-script.py
