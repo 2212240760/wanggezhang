@@ -1,771 +1,745 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
-from io import BytesIO
-import sqlite3
-import sys
 import os
+import pandas as pd
+import streamlit as st
+import plotly.graph_objects as go
+import sqlite3
+from io import BytesIO
+from datetime import datetime, timedelta
+import shutil
+import streamlit_authenticator as stauth
+import yaml
+from yaml.loader import SafeLoader
 
-# 调试入口（仅在独立Streamlit环境中启用调试器）
-is_streamlit_env = getattr(st, '_is_running_with_streamlit', False)
-is_pycharm_debug = 'pydevd' in sys.modules
+# 确保数据库目录存在
+db_dir = "data"
+os.makedirs(db_dir, exist_ok=True)
+db_path = os.path.join(db_dir, "grid_assessment.db")
 
-# 调试配置（仅在独立Streamlit环境且非PyCharm调试模式下生效）
-try:
-    if is_streamlit_env and not is_pycharm_debug:
-        import debugpy
-        debugpy.listen(("0.0.0.0", 5678))
-        print("调试器已启动，等待连接...")
-except ImportError:
-    print("debugpy 模块未安装，无法启动调试器")
+# 加载用户认证配置
+with open('config.yaml') as file:
+    config = yaml.load(file, Loader=SafeLoader)
 
-# 初始化全局设置
-st.set_page_config(page_title="网格长能力画像系统", layout="wide")
-st.title("乡镇网格长绩效与能力画像评估系统")
+authenticator = stauth.Authenticate(
+    config['credentials'],
+    config['cookie']['name'],
+    config['cookie']['key'],
+    config['cookie']['expiry_days'],
+    config['preauthorized']
+)
 
-# 数据库文件路径
-DB_FILE = 'grid_leaders.db'
+name, authentication_status, username = authenticator.login('登录', 'main')
 
-# 数据库连接与初始化
-def init_database():
-    """
-    初始化SQLite数据库并创建表结构。
-    该函数会连接到指定的SQLite数据库文件，若文件不存在则创建新文件。
-    然后创建三个表：网格长表、评估记录表和能力提升计划表。
-    若表已存在，则不会重复创建。
-    """
-    try:
-        # 连接到SQLite数据库文件，如果文件不存在则创建新文件
-        conn = sqlite3.connect(DB_FILE)
-        # 创建一个游标对象，用于执行SQL语句
-        cursor = conn.cursor()
+if authentication_status:
+    authenticator.logout('退出登录', 'main')
+    st.write(f'欢迎 *{name}*')
 
-        # 创建网格长表，存储网格长的基本信息
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS grid_leaders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, -- 网格长的唯一标识，自增整数
-            name TEXT NOT NULL, -- 网格长的姓名，非空字符串
-            area TEXT NOT NULL -- 网格长负责的辖区，非空字符串
-        )
-        ''')
-
-        # 创建评估记录表，存储每个网格长的评估记录
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS assessments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, -- 评估记录的唯一标识，自增整数
-            leader_id INTEGER, -- 关联的网格长ID，外键
-            date TEXT NOT NULL, -- 评估日期，非空字符串
-            professional_skill INTEGER, -- 专业技术能力得分，整数
-            index_mastery INTEGER, -- 指标掌控能力得分，整数
-            management_execution INTEGER, -- 管理执行能力得分，整数
-            communication_coordination INTEGER, -- 沟通协调能力得分，整数
-            marketing_ability INTEGER, -- 市场营销能力得分，整数
-            FOREIGN KEY (leader_id) REFERENCES grid_leaders (id) -- 外键约束，关联网格长表的id
-        )
-        ''')
-
-        # 创建能力提升计划表，存储每个网格长的能力提升计划
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS improvement_plans (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, -- 能力提升计划的唯一标识，自增整数
-            leader_id INTEGER, -- 关联的网格长ID，外键
-            dimension TEXT NOT NULL, -- 能力维度名称，非空字符串
-            target_score INTEGER, -- 目标提升分数，整数
-            FOREIGN KEY (leader_id) REFERENCES grid_leaders (id) -- 外键约束，关联网格长表的id
-        )
-        ''')
-
-        # 提交所有的数据库操作，将更改保存到数据库文件
-        conn.commit()
-    except sqlite3.Error as e:
-        # 若执行过程中出现SQLite相关错误，打印错误信息
-        print(f"数据库初始化出错: {e}")
-    finally:
-        # 无论是否发生异常，只要数据库连接存在，就关闭连接
-        if conn:
-            conn.close()
-
-
-def get_db_connection():
-    """获取数据库连接"""
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-# 初始化数据库
-init_database()
-
-
-# 数据库操作函数
-def get_all_leaders():
-    """获取所有网格长"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM grid_leaders')
-    leaders = cursor.fetchall()
-    conn.close()
-    return leaders
-
-
-def get_leader_by_name(name):
-    """根据姓名获取网格长"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM grid_leaders WHERE name =?', (name,))
-    leader = cursor.fetchone()
-    conn.close()
-    return leader
-
-
-def get_leader_assessments(leader_id):
-    """获取网格长的所有评估记录"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        'SELECT * FROM assessments WHERE leader_id =? ORDER BY date DESC',
-        (leader_id,)
-    )
-    assessments = cursor.fetchall()
-    conn.close()
-    return assessments
-
-
-def add_leader(name, area):
-    """添加新网格长"""
-    # 验证姓名和辖区是否为空
-    if not name or not area:
-        st.error("姓名和辖区不能为空，请重新输入。")
-        return
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('INSERT INTO grid_leaders (name, area) VALUES (?,?)', (name, area))
-    conn.commit()
-    conn.close()
-
-
-def add_assessment(leader_id, date, scores):
-    """添加评估记录"""
-    # 验证分数是否在 0 到 100 之间
-    for score in scores.values():
-        if score < 0 or score > 100:
-            st.error("分数必须在 0 到 100 之间，请重新输入。")
-            return
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        '''INSERT INTO assessments (leader_id, date, professional_skill, index_mastery, 
-                   management_execution, communication_coordination, marketing_ability) 
-                   VALUES (?,?,?,?,?,?,?)''',
-        (leader_id, date, scores["专业技术能力"], scores["指标掌控能力"],
-         scores["管理执行能力"], scores["沟通协调能力"], scores["市场营销能力"])
-    )
-    conn.commit()
-    conn.close()
-
-
-def update_assessment(assessment_id, scores):
-    """修改评估记录"""
-    # 验证分数是否在 0 到 100 之间
-    for score in scores.values():
-        if score < 0 or score > 100:
-            st.error("分数必须在 0 到 100 之间，请重新输入。")
-            return
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        '''UPDATE assessments 
-           SET professional_skill = ?, index_mastery = ?, 
-               management_execution = ?, communication_coordination = ?, marketing_ability = ?
-           WHERE id = ?''',
-        (scores["专业技术能力"], scores["指标掌控能力"],
-         scores["管理执行能力"], scores["沟通协调能力"], scores["市场营销能力"], assessment_id)
-    )
-    conn.commit()
-    conn.close()
-
-
-def save_improvement_plan(leader_id, dimension, target_score):
-    """保存能力提升计划"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        'INSERT INTO improvement_plans (leader_id, dimension, target_score) VALUES (?,?,?)',
-        (leader_id, dimension, target_score)
-    )
-    conn.commit()
-    conn.close()
-
-
-# 初始化示例数据
-def init_sample_data():
-    """初始化示例数据到数据库"""
-    # 检查是否已有数据
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT COUNT(*) FROM grid_leaders')
-    leaders_count = cursor.fetchone()[0]
-    conn.close()
-
-    if leaders_count == 0:
-        # 添加示例网格长
-        add_leader("张明", "东风社区")
-        add_leader("李红", "河西社区")
-
-        # 获取网格长ID
-        leader1 = get_leader_by_name("张明")
-        leader2 = get_leader_by_name("李红")
-
-        # 添加评估记录
-        add_assessment(leader1["id"], "2023-09-30", {
-            "专业技术能力": 82, "指标掌控能力": 76,
-            "管理执行能力": 85, "沟通协调能力": 79,
-            "市场营销能力": 68
-        })
-
-        add_assessment(leader2["id"], "2023-09-30", {
-            "专业技术能力": 88, "指标掌控能力": 92,
-            "管理执行能力": 75, "沟通协调能力": 85,
-            "市场营销能力": 78
-        })
-
-
-# 初始化示例数据
-init_sample_data()
-
-# 能力维度配置
-DIMENSIONS = [
-    "专业技术能力", "指标掌控能力",
-    "管理执行能力", "沟通协调能力",
-    "市场营销能力"
-]
-
-WEIGHTS = {
-    "专业技术能力": 0.25,
-    "指标掌控能力": 0.25,
-    "管理执行能力": 0.20,
-    "沟通协调能力": 0.20,
-    "市场营销能力": 0.10
-}
-
-THRESHOLDS = {
-    "优秀": 90,
-    "良好": 80,
-    "合格": 70,
-    "待改进": 60
-}
-
-# 改进建议库
-IMPROVEMENT_TIPS = {
-    "专业技术能力": [
-        "参加政策法规专题培训（每月至少1次）",
-        "每日学习'政策一点通'平台更新内容",
-        "建立个人业务知识库，记录疑难问题解决方案",
-        "向业务骨干请教典型案例处理方法"
-    ],
-    "指标掌控能力": [
-        "使用指标跟踪表每日监控关键数据",
-        "每周分析指标波动原因并制定对策",
-        "优先处理高权重指标相关任务",
-        "学习基础数据分析方法（Excel/PowerBI）"
-    ],
-    "管理执行能力": [
-        "使用甘特图进行任务分解和时间管理",
-        "建立每日工作清单并设置优先级",
-        "实施'PDCA'循环改进工作流程",
-        "每周召开15分钟网格员站会同步进展"
-    ],
-    "沟通协调能力": [
-        "主动走访关键居民（每周5户以上）",
-        "学习'非暴力沟通'技巧并实践",
-        "建立跨部门联系人清单定期维护关系",
-        "重要沟通前准备提纲和解决方案草案"
-    ],
-    "市场营销能力": [
-        "设计社区活动宣传方案（图文+短视频）",
-        "挖掘辖区资源建立合作名录",
-        "在居民群定期推送服务信息（每周3次）",
-        "组织'网格开放日'提升居民参与度"
-    ]
-}
-
-# 界面布局
-with st.sidebar:
-    st.header("网格长管理")
-    leaders = get_all_leaders()
-    leader_names = [leader["name"] for leader in leaders]
-    search_term = st.text_input("搜索网格长")
-    if search_term:
-        leader_names = [name for name in leader_names if search_term.lower() in name.lower()]
-    selected_name = st.selectbox(
-        "选择网格长",
-        options=leader_names
-    )
-
-    # 获取当前选中网格长
-    current_leader = get_leader_by_name(selected_name)
-    if current_leader is None:
-        st.error("未找到该网格长，请检查输入。")
-        st.stop()
-    leader_id = current_leader["id"]
-
-    st.divider()
-    st.subheader("添加新评估")
-    assessment_date = st.date_input("评估日期", datetime.today())
-    new_scores = {}
-    for dim in DIMENSIONS:
-        new_scores[dim] = st.slider(
-            f"{dim}得分",
-            min_value=0, max_value=100, value=80
-        )
-
-    if st.button("提交评估"):
-        add_assessment(
-            leader_id,
-            str(assessment_date),
-            new_scores
-        )
-        st.success(f"{selected_name}的评估数据已更新！")
-
-    st.divider()
-    st.subheader("修改评估数据")
-    assessments = get_leader_assessments(leader_id)
-    if assessments:
-        assessment_dates = [assessment["date"] for assessment in assessments]
-        selected_date = st.selectbox("选择评估日期", assessment_dates)
-        selected_assessment = next((a for a in assessments if a["date"] == selected_date), None)
-        if selected_assessment:
-            edit_scores = {}
-            # 映射中文维度名称到数据库列名
-            dim_to_db_col = {
-                "专业技术能力": "professional_skill",
-                "指标掌控能力": "index_mastery",
-                "管理执行能力": "management_execution",
-                "沟通协调能力": "communication_coordination",
-                "市场营销能力": "marketing_ability"
-            }
-            for dim in DIMENSIONS:
-                # 使用正确的列名从数据库记录中获取值
-                db_col_name = dim_to_db_col[dim]
-                edit_scores[dim] = st.slider(
-                    f"{dim}得分",
-                    min_value=0, max_value=100,
-                    value=selected_assessment[db_col_name],
-                    key=f"edit_{dim}"
-                )
-            if st.button("保存修改"):
-                update_assessment(selected_assessment["id"], edit_scores)
-                st.success(f"{selected_name}在{selected_date}的评估数据已更新！")
-
-    st.divider()
-    # 数据导入部分
-    st.sidebar.divider()
-    st.sidebar.subheader("数据管理")
-    st.divider()
-    st.subheader("导入Excel数据")
-    uploaded_file = st.file_uploader("选择Excel文件", type=["xlsx", "xls","csv"])
-    if uploaded_file is not None:
-        def read_excel_file(file_path):
-            """读取Excel或CSV文件并返回DataFrame"""
-            try:
-                if file_path.endswith('.csv'):
-                    # 尝试不同的编码
-                    encodings = ['utf-8', 'gbk', 'gb2312', 'cp1252']
-                    for encoding in encodings:
-                        try:
-                            df = pd.read_csv(file_path, encoding=encoding)
-                            break
-                        except UnicodeDecodeError:
-                            continue
-                    else:
-                        st.error("无法确定CSV文件的编码，请检查文件编码。")
-                        return None
-                elif file_path.endswith('.xlsx'):
-                    # 对于 .xlsx 文件，使用 openpyxl 引擎
-                    df = pd.read_excel(file_path, engine='openpyxl')
-                elif file_path.endswith('.xls'):
-                    # 对于 .xls 文件，使用 xlrd 引擎
-                    df = pd.read_excel(file_path, engine='xlrd')
-                else:
-                    st.error("不支持的文件格式，请上传 CSV、XLS 或 XLSX 文件。")
-                    return None
-                # 检查必要的列
-                required_columns = ["姓名", "辖区", "评估日期", "专业技术能力", "指标掌控能力", "管理执行能力", "沟通协调能力", "市场营销能力"]
-                if all(col in df.columns for col in required_columns):
-                    return df
-                else:
-                    st.error("文件缺少必要的列，请检查模板。")
-                    return None
-            except Exception as e:
-                st.error(f"读取文件失败: {e}")
-                return None
-
+    def get_db_connection():
+        """获取数据库连接，添加异常处理"""
         try:
-            # 保存上传的文件到临时路径
-            temp_file_path = "temp_uploaded_file" + os.path.splitext(uploaded_file.name)[1]
-            with open(temp_file_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            
-            # 调用 read_excel_file 函数读取文件
-            df = read_excel_file(temp_file_path)
-            
-            if df is not None:
-                print(f"数据基本信息：")
-                df.info()
-                for index, row in df.iterrows():
-                    name = row["姓名"]
-                    area = row["辖区"]
-                    date = str(row["评估日期"])
-                    scores = {
-                        "专业技术能力": row["专业技术能力"],
-                        "指标掌控能力": row["指标掌控能力"],
-                        "管理执行能力": row["管理执行能力"],
-                        "沟通协调能力": row["沟通协调能力"],
-                        "市场营销能力": row["市场营销能力"]
-                    }
-                    leader = get_leader_by_name(name)
-                    if leader is None:
-                        add_leader(name, area)
-                        leader = get_leader_by_name(name)
-                    add_assessment(leader["id"], date, scores)
-                st.success("数据导入成功！")
-            else:
-                st.error("无法读取上传的文件，请检查文件格式。")
+            conn = sqlite3.connect(db_path)
+            # 确保中文显示正常
+            conn.text_factory = str
+            return conn
         except Exception as e:
-            st.error(f"数据导入失败: {e}")
+            st.error(f"无法连接到数据库: {e}")
+            return None
+
+    def validate_score(score):
+        """验证分数是否有效"""
+        try:
+            score = float(score)
+            return 0 <= score <= 100
+        except (ValueError, TypeError):
+            return False
+
+    def update_assessment(assessment_id, scores):
+        """更新评估数据"""
+        conn = get_db_connection()
+        if conn is None:
+            return False
+        
+        try:
+            cursor = conn.cursor()
+            # 构建SQL更新语句
+            set_clauses = ", ".join([f"{dim_to_db_col[dim]} = ?" for dim in DIMENSIONS])
+            values = [scores[dim] for dim in DIMENSIONS] + [assessment_id]
+            
+            sql = f"UPDATE assessments SET {set_clauses} WHERE id = ?"
+            cursor.execute(sql, values)
+            conn.commit()
+            return True
+        except Exception as e:
+            st.error(f"更新评估数据失败: {e}")
+            conn.rollback()
+            return False
         finally:
-            # 删除临时文件
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
+            if conn:
+                conn.close()
 
-# 主显示区
-assessments = get_leader_assessments(leader_id)
-current_scores = None
+    def get_leader_assessments(leader_id):
+        """获取网格长评估数据"""
+        conn = get_db_connection()
+        if conn is None:
+            return []
+        
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM assessments WHERE leader_id = ? ORDER BY date DESC",
+                (leader_id,)
+            )
+            columns = [col[0] for col in cursor.description]
+            # 确保将查询结果转换为字典，避免使用元组索引
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        except Exception as e:
+            st.error(f"获取评估数据失败: {e}")
+            return []
+        finally:
+            if conn:
+                conn.close()
 
-if assessments:
-    current_scores = {
-        "专业技术能力": assessments[0]["professional_skill"],
-        "指标掌控能力": assessments[0]["index_mastery"],
-        "管理执行能力": assessments[0]["management_execution"],
-        "沟通协调能力": assessments[0]["communication_coordination"],
-        "市场营销能力": assessments[0]["marketing_ability"],
-        "date": assessments[0]["date"]
+    def handle_none_scores(scores, dimensions):
+        """处理分数中的None值，确保所有维度都有值"""
+        for dim in dimensions:
+            if dim not in scores or scores[dim] is None:
+                scores[dim] = 0
+        return scores
+
+    def calculate_total_score(scores, weights, dimensions):
+        """计算综合得分"""
+        total = 0
+        for dim in dimensions:
+            total += scores.get(dim, 0) * weights[dim]
+        return total
+
+    def get_all_leaders(refresh=False):
+        """获取所有网格长，支持强制刷新缓存"""
+        conn = get_db_connection()
+        if conn is None:
+            return []
+        
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM grid_leaders")
+            columns = [col[0] for col in cursor.description]
+            leaders = [dict(zip(columns, row)) for row in cursor.fetchall()]
+            
+            # 强制刷新时更新缓存
+            if refresh:
+                st.session_state.all_leaders = leaders
+            return leaders
+        except Exception as e:
+            st.error(f"获取网格长列表失败: {e}")
+            return []
+        finally:
+            if conn:
+                conn.close()
+
+    # 能力维度配置
+    DIMENSIONS = [
+        "专业技术能力", "指标掌控能力", "管理执行能力", "沟通协调能力", "市场营销能力",
+        "超长工单占比", "催单率", "上门及时率", "重复投诉率", "万投比",
+        "触点服务客户满意占比", "质差客户占比", "家宽单用户中断时长", "家宽弱光率",
+        "任务工单支撑及时率", "交班交底率", "终端盘点", "人员达标率",
+        "低销占比", "商机转化率", "元宝完成率", "终端收入"
+    ]
+    
+    # 定义数据库字段映射
+    db_columns = [
+        "professional_skill", "index_mastery", "management_execution", "communication_coordination", "marketing_ability",
+        "long_work_order_ratio", "reminder_rate", "on_site_timeliness", "repeat_complaint_rate", "complaints_per_ten_thousand",
+        "contact_service_satisfaction", "poor_quality_customer_ratio", "home_broadband_interrupt_duration", "home_broadband_weak_light_rate",
+        "task_support_timeliness", "handover_rate", "terminal_inventory", "personnel_qualified_rate",
+        "low_sales_ratio", "business_opportunity_conversion_rate", "yuanbao_completion_rate", "terminal_revenue"
+    ]
+    
+    # 创建维度到数据库列的映射
+    dim_to_db_col = {dim: db_col for dim, db_col in zip(DIMENSIONS, db_columns)}
+    WEIGHTS = {dim: 1/len(DIMENSIONS) for dim in DIMENSIONS}
+    THRESHOLDS = {
+        "优秀": 85,
+        "良好": 75,
+        "合格": 60
     }
+    
+    IMPROVEMENT_TIPS = {
+        "专业技术能力": ["加强专业技能培训", "参与技术交流活动", "考取相关专业证书"],
+        "指标掌控能力": ["深入理解业务指标体系", "定期分析指标数据", "制定针对性提升计划"],
+        "管理执行能力": ["优化工作流程", "加强团队协作", "提高执行力和决策力"],
+        "沟通协调能力": ["加强团队沟通", "提高跨部门协作能力", "提升客户沟通技巧"],
+        "市场营销能力": ["学习市场营销知识", "分析市场趋势", "提高客户开发能力"],
+        "超长工单占比": ["优化工单处理流程", "提高工单处理效率", "加强工单跟踪管理"],
+        "催单率": ["提高服务质量", "及时响应客户需求", "优化服务流程"],
+        "上门及时率": ["合理安排上门服务时间", "加强服务人员管理", "提高服务效率"],
+        "重复投诉率": ["提高问题解决能力", "加强服务质量监督", "建立客户反馈机制"],
+        "万投比": ["提高服务质量", "加强客户关系管理", "优化服务流程"],
+        "触点服务客户满意占比": ["提高服务态度", "加强服务技能培训", "建立客户反馈机制"],
+        "质差客户占比": ["提高服务质量", "加强网络维护", "优化网络质量"],
+        "家宽单用户中断时长": ["加强网络维护", "提高故障处理效率", "优化网络结构"],
+        "家宽弱光率": ["加强线路维护", "优化光路质量", "提高设备性能"],
+        "任务工单支撑及时率": ["加强团队协作", "提高工作效率", "优化任务分配"],
+        "交班交底率": ["建立规范的交接班制度", "加强交接班管理", "提高工作responsibility"],
+        "终端盘点": ["建立完善的终端管理制度", "定期进行终端盘点", "提高资产管理水平"],
+        "人员达标率": ["加强人员培训", "建立考核机制", "提高人员素质"],
+        "低销占比": ["加强市场调研", "优化产品结构", "提高销售能力"],
+        "商机转化率": ["加强市场分析", "优化销售策略", "提高销售技巧"],
+        "元宝完成率": ["明确目标任务", "制定合理计划", "加强过程管理"],
+        "终端收入": ["优化产品结构", "提高销售能力", "加强客户关系管理"]
+    }
+    
+    # 初始化数据库
+    def init_database():
+        conn = get_db_connection()
+        if conn is None:
+            return
+        
+        try:
+            cursor = conn.cursor()
+            
+            # 创建网格长表
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS grid_leaders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                area TEXT NOT NULL
+            )
+            ''')
+            
+            # 创建评估表
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS assessments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                leader_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                professional_skill REAL,
+                index_mastery REAL,
+                management_execution REAL,
+                communication_coordination REAL,
+                marketing_ability REAL,
+                long_work_order_ratio REAL,
+                reminder_rate REAL,
+                on_site_timeliness REAL,
+                repeat_complaint_rate REAL,
+                complaints_per_ten_thousand REAL,
+                contact_service_satisfaction REAL,
+                poor_quality_customer_ratio REAL,
+                home_broadband_interrupt_duration REAL,
+                home_broadband_weak_light_rate REAL,
+                task_support_timeliness REAL,
+                handover_rate REAL,
+                terminal_inventory REAL,
+                personnel_qualified_rate REAL,
+                low_sales_ratio REAL,
+                business_opportunity_conversion_rate REAL,
+                yuanbao_completion_rate REAL,
+                terminal_revenue REAL,
+                import_date TEXT,
+                FOREIGN KEY (leader_id) REFERENCES grid_leaders (id)
+            )
+            ''')
+            
+            conn.commit()
+            st.success("数据库初始化成功！")
+            st.session_state.database_initialized = True
+        except Exception as e:
+            st.error(f"数据库初始化失败: {e}")
+            conn.rollback()
+        finally:
+            if conn:
+                conn.close()
+    
+    def import_data(file):
+        """导入数据时支持列名映射，解决缺少必要列的问题"""
+        if file.name.endswith('.csv'):
+            # 读取文件内容，检查是否为空
+            content = file.read().decode('utf-8', errors='ignore')
+            if not content.strip():
+                st.error("上传的 CSV 文件为空，请检查文件内容。")
+                return False
+            file.seek(0)  # 将文件指针重置到文件开头
+            try:
+                # 先尝试使用 UTF-8 编码
+                df = pd.read_csv(file, encoding='utf-8', skipinitialspace=True, skip_blank_lines=True)
+            except UnicodeDecodeError:
+                file.seek(0)  # 重置文件指针
+                try:
+                    # 若 UTF-8 失败，尝试 GBK 编码
+                    df = pd.read_csv(file, encoding='gbk', skipinitialspace=True, skip_blank_lines=True)
+                except UnicodeDecodeError:
+                    file.seek(0)  # 重置文件指针
+                    try:
+                        # 若 GBK 失败，尝试 GB2312 编码
+                        df = pd.read_csv(file, encoding='gb2312', skipinitialspace=True, skip_blank_lines=True)
+                    except UnicodeDecodeError:
+                        st.error("无法识别文件编码，请确保文件编码为 UTF-8、GBK 或 GB2312。")
+                        return False
+        elif file.name.endswith(('.xlsx', '.xls')):
+            df = pd.read_excel(file)
+        else:
+            st.error("不支持的文件格式，请上传 xlsx、xls 或 csv 文件。")
+            return False
+        
+        # 检查 DataFrame 是否为空
+        if df.empty:
+            st.error("上传的文件为空或无法解析出有效数据，请检查文件内容。")
+            return False
+        
+        # 显示文件前几行供用户确认
+        st.subheader("文件数据预览")
+        st.write(df.head())
+        
+        # 定义必须的列（程序所需的字段）
+        required_fields = ['name', 'area', 'date'] + list(dim_to_db_col.values())
+        
+        # 获取文件中的列名
+        file_columns = df.columns.tolist()
+        
+        # 列名映射设置界面
+        st.subheader("列名映射设置")
+        st.info("请将文件中的列映射到系统所需的字段，未映射的字段将设为0")
+        
+        # 映射必须的字段：name, area, date
+        mapped_fields = {}
+        
+        # 映射 name 列
+        st.write("### 基本信息映射")
+        name_options = ['无匹配列'] + file_columns
+        mapped_fields['name'] = st.selectbox("映射到 '姓名' 字段", name_options, key="map_name")
+        
+        # 映射 area 列
+        area_options = ['无匹配列'] + file_columns
+        mapped_fields['area'] = st.selectbox("映射到 '辖区' 字段", area_options, key="map_area")
+        
+        # 映射 date 列
+        date_options = ['无匹配列'] + file_columns
+        mapped_fields['date'] = st.selectbox("映射到 '评估日期' 字段", date_options, key="map_date")
+        
+        # 映射评估维度列
+        st.write("### 能力评估维度映射")
+        for dim, db_col in dim_to_db_col.items():
+            col_options = ['无匹配列（设为0）'] + file_columns
+            mapped_fields[db_col] = st.selectbox(f"映射到 '{dim}' 字段", col_options, key=f"map_{db_col}")
+        
+        # 确认映射
+        if 'confirm_import' not in st.session_state:
+            st.session_state.confirm_import = False
+        
+        if st.button("确认映射并导入", key="confirm_import_button"):
+            st.session_state.confirm_import = True
+        
+        if st.session_state.confirm_import:
+            # 检查基本信息是否有映射
+            if mapped_fields['name'] == '无匹配列' or mapped_fields['area'] == '无匹配列' or mapped_fields['date'] == '无匹配列':
+                st.error("姓名、辖区和评估日期必须映射有效列！")
+                st.session_state.confirm_import = False
+                return False
+            
+            # 准备导入数据
+            conn = get_db_connection()
+            if conn is None:
+                st.session_state.confirm_import = False
+                return False
+            
+            try:
+                with conn:  # 使用上下文管理器自动管理事务
+                    cursor = conn.cursor()
+                    # 导入网格长数据（去重处理）
+                    leaders_data = df.drop_duplicates(subset=[mapped_fields['name'], mapped_fields['area']])
+                    for _, row in leaders_data.iterrows():
+                        leader_name = row[mapped_fields['name']]
+                        leader_area = row[mapped_fields['area']]
+                        cursor.execute("INSERT OR IGNORE INTO grid_leaders (name, area) VALUES (?, ?)", (leader_name, leader_area))
+                
+                    # 导入评估数据，记录导入日期
+                    import_date = datetime.now().strftime('%Y/%m/%d')
+                    assessment_data = df.copy()
+                    
+                    # 处理评估维度数据
+                    for db_col in dim_to_db_col.values():
+                        file_col = mapped_fields[db_col]
+                        if file_col != '无匹配列（设为0）':
+                            # 使用映射的列
+                            assessment_data[db_col] = assessment_data[file_col]
+                        else:
+                            # 无匹配列，设为0
+                            assessment_data[db_col] = 0
+                    
+                    # 批量导入评估数据
+                    for _, row in assessment_data.iterrows():
+                        # 查找网格长ID
+                        leader_name = row[mapped_fields['name']]
+                        cursor.execute("SELECT id FROM grid_leaders WHERE name = ?", (leader_name,))
+                        leader = cursor.fetchone()
+                        if leader:
+                            leader_id = leader[0]
+                            # 处理日期格式
+                            try:
+                                # 尝试解析多种可能的日期格式
+                                date_str = str(row[mapped_fields['date']])
+                                if ' ' in date_str:
+                                    date_obj = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+                                else:
+                                    date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+                                date_value = date_obj.strftime('%Y/%m/%d')
+                            except ValueError:
+                                st.error(f"日期格式错误: {row[mapped_fields['date']]}，请使用 'YYYY-MM-DD' 或 'YYYY-MM-DD HH:MM:SS' 格式。")
+                                st.session_state.confirm_import = False
+                                return False
+                            
+                            values = [
+                                leader_id, date_value
+                            ] + [row[db_col] for db_col in dim_to_db_col.values()] + [import_date]
+                            
+                            columns = "leader_id, date, " + ", ".join(dim_to_db_col.values()) + ", import_date"
+                            placeholders = ", ".join(["?"] * (len(dim_to_db_col) + 3))
+                            cursor.execute(f"INSERT INTO assessments ({columns}) VALUES ({placeholders})", values)
+                    
+                    # 强制刷新网格长列表缓存
+                    get_all_leaders(refresh=True)
+                    st.success(f"成功导入 {len(leaders_data)} 条网格长数据和 {len(assessment_data)} 条评估数据")
+                    st.session_state.confirm_import = False
+                    return True
+            except Exception as e:
+                st.error(f"数据导入失败: {str(e)}")
+                st.session_state.confirm_import = False
+                return False
+            finally:
+                if conn:
+                    conn.close()
 
-if current_scores:
-    col1, col2 = st.columns([1, 2])
-
-    with col1:
-        st.subheader(f"{current_leader['name']} - {current_leader['area']}")
-
-        # 计算综合得分
-        total_score = sum(
-            current_scores[dim] * WEIGHTS[dim]
-            for dim in DIMENSIONS
-        )
-
-        # 综合得分展示
-        score_color = (
-            "green" if total_score >= 85
-            else "orange" if total_score >= 75
-            else "red"
-        )
-        st.markdown(f"""
-        <div style="text-align:center; padding:20px; border-radius:10px; background:#f0f2f6">
-            <h3>综合能力得分</h3>
-            <h1 style="color:{score_color}">{total_score:.1f}<span style="font-size:20px">/100</span></h1>
-            <p>{'优秀' if total_score >= 85 else '良好' if total_score >= 75 else '待提升'}</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # 能力等级分布
-        st.subheader("能力等级分布")
-        level_counts = {"优秀": 0, "良好": 0, "合格": 0, "待改进": 0}
-        for dim in DIMENSIONS:
-            score = current_scores[dim]
-            if score >= THRESHOLDS["优秀"]:
-                level_counts["优秀"] += 1
-            elif score >= THRESHOLDS["良好"]:
-                level_counts["良好"] += 1
-            elif score >= THRESHOLDS["合格"]:
-                level_counts["合格"] += 1
-            else:
-                level_counts["待改进"] += 1
-
-        level_df = pd.DataFrame({
-            "等级": level_counts.keys(),
-            "数量": level_counts.values()
-        })
-        st.bar_chart(level_df.set_index("等级"))
-
-    with col2:
-        # 雷达图展示
-        st.subheader("能力维度分析")
-        fig = go.Figure()
-        fig.add_trace(go.Scatterpolar(
-            r=[current_scores[dim] for dim in DIMENSIONS],
-            theta=DIMENSIONS,
-            fill='toself',
-            name='当前能力值'
-        ))
-        fig.update_layout(
-            polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
-            showlegend=False,
-            height=400
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-        # 短板分析
-        st.subheader("短板分析与改进建议")
-        weaknesses = sorted(
-            [(dim, current_scores[dim]) for dim in DIMENSIONS],
-            key=lambda x: x[1]
-        )[:2]  # 取最弱的2项
-
-        for dim, score in weaknesses:
-            with st.expander(f"{dim} ({score}分) 改进建议"):
-                st.warning(f"当前能力值低于{'优秀' if score < 90 else '良好' if score < 80 else '合格'}水平")
-
-                # 显示改进建议
-                for i, tip in enumerate(IMPROVEMENT_TIPS[dim][:3]):
-                    st.markdown(f"{i + 1}. {tip}")
-
-                # 进度跟踪
-                st.progress(score / 100, f"能力提升进度 ({score}→{min(100, score + 15)})")
-
-                # 设置提升目标
-                target = st.slider(
-                    f"{dim}提升目标",
-                    min_value=score, max_value=100,
-                    value=min(100, score + 15), key=dim
+    def export_assessment_data(leader_id=None):
+        """导出评估数据为 DataFrame，支持指定网格长或全部"""
+        conn = get_db_connection()
+        if conn is None:
+            return pd.DataFrame()
+        try:
+            cursor = conn.cursor()
+            if leader_id is not None:
+                cursor.execute(
+                    "SELECT a.*, g.name, g.area FROM assessments a LEFT JOIN grid_leaders g ON a.leader_id = g.id WHERE a.leader_id = ? ORDER BY a.date DESC",
+                    (leader_id,)
                 )
-                if st.button(f"保存{dim}提升目标"):
-                    save_improvement_plan(leader_id, dim, target)
-                    st.success(f"{dim}提升目标已保存！")
+            else:
+                cursor.execute(
+                    "SELECT a.*, g.name, g.area FROM assessments a LEFT JOIN grid_leaders g ON a.leader_id = g.id ORDER BY a.date DESC"
+                )
+            rows = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+            df = pd.DataFrame(rows, columns=columns)
+            return df
+        except Exception as e:
+            st.error(f"导出数据失败: {e}")
+            return pd.DataFrame()
+        finally:
+            if conn:
+                conn.close()
 
-# 历史趋势分析
-st.divider()
-st.subheader("能力发展轨迹")
-if len(assessments) > 1:
-    history_data = []
-    for assessment in assessments:
-        # 修改这里，使用正确的列名
-        score_dict = {
-            "date": assessment["date"],
-            "专业技术能力": assessment["professional_skill"],
-            "指标掌控能力": assessment["index_mastery"],
-            "管理执行能力": assessment["management_execution"],
-            "沟通协调能力": assessment["communication_coordination"],
-            "市场营销能力": assessment["marketing_ability"],
-        }
-        score_dict["综合得分"] = sum(
-            score_dict[dim] * WEIGHTS[dim]
-            for dim in DIMENSIONS
-        )
-        history_data.append(score_dict)
+    def clear_expired_data(days=30):
+        """清理超过指定天数的评估数据"""
+        conn = get_db_connection()
+        if conn is None:
+            return False
+        
+        try:
+            cursor = conn.cursor()
+            expired_date = (datetime.now() - timedelta(days=days)).strftime('%Y/%m/%d')
+            cursor.execute("DELETE FROM assessments WHERE import_date < ?", (expired_date,))
+            conn.commit()
+            return True
+        except Exception as e:
+            st.error(f"清理过期数据失败: {e}")
+            conn.rollback()
+            return False
+        finally:
+            if conn:
+                conn.close()
 
-    history_df = pd.DataFrame(history_data)
-    history_df = history_df.set_index("date")
+    def to_excel(df):
+        """将 DataFrame 导出为 Excel 文件的二进制流"""
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False)
+        output.seek(0)
+        return output.getvalue()
 
-    # 趋势图
-    tab1, tab2 = st.tabs(["维度趋势", "综合趋势"])
-    with tab1:
-        selected_dims = st.multiselect(
-            "选择观察维度",
-            DIMENSIONS, default=DIMENSIONS[:2]
-        )
-        st.line_chart(history_df[selected_dims])
+    def clear_data():
+        """清空所有评估数据和网格长数据"""
+        conn = get_db_connection()
+        if conn is None:
+            return False
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM assessments")
+            cursor.execute("DELETE FROM grid_leaders")
+            conn.commit()
+            # 清空缓存
+            if 'all_leaders' in st.session_state:
+                del st.session_state.all_leaders
+            st.success("所有数据已成功清空！")
+            return True
+        except Exception as e:
+            st.error(f"清空数据失败: {e}")
+            conn.rollback()
+            return False
+        finally:
+            if conn:
+                conn.close()
 
-    with tab2:
-        st.line_chart(history_df["综合得分"])
-else:
-    st.info("至少需要2次评估数据才能显示趋势分析")
+    def backup_database():
+        """备份数据库"""
+        backup_dir = "backups"
+        os.makedirs(backup_dir, exist_ok=True)
+        backup_file = os.path.join(backup_dir, f"grid_assessment_{datetime.now().strftime('%Y%m%d%H%M%S')}.db")
+        try:
+            shutil.copy2(db_path, backup_file)
+            st.info(f"数据库备份成功，备份文件路径: {backup_file}")
+            return True
+        except Exception as e:
+            st.error(f"数据库备份失败: {e}")
+            return False
 
-# 数据管理功能
-st.sidebar.divider()
-st.sidebar.subheader("数据管理")
-if st.sidebar.button("导出当前数据 (CSV)"):
-    # 从数据库获取所有数据
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT 
-            gl.name as "姓名", 
-            gl.area as "辖区", 
-            a.date as "评估日期",
-            a.professional_skill as "专业技术能力",
-            a.index_mastery as "指标掌控能力",
-            a.management_execution as "管理执行能力",
-            a.communication_coordination as "沟通协调能力",
-            a.marketing_ability as "市场营销能力"
-        FROM grid_leaders gl
-        JOIN assessments a ON gl.id = a.leader_id
-    ''')
-    data = cursor.fetchall()
-    conn.close()
-
-    df = pd.DataFrame([dict(row) for row in data])
-    if not df.empty:
-        # 计算综合得分
-        df["综合得分"] = df.apply(lambda row: sum(
-            row[dim] * WEIGHTS[dim] for dim in DIMENSIONS
-        ), axis=1)
-
-        st.sidebar.download_button(
-            label="下载CSV",
-            data=df.to_csv(index=False).encode('utf-8'),
-            file_name="网格长评估数据.csv",
-            mime="text/csv"
-        )
-
-if st.sidebar.button("重置示例数据"):
-    # 清空数据库
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM assessments')
-    cursor.execute('DELETE FROM grid_leaders')
-    cursor.execute('DELETE FROM improvement_plans')
-    conn.commit()
-    conn.close()
-
-    # 重新初始化示例数据
-    init_sample_data()
-    st.rerun()
-
-
-# 团队对比分析
-def compare_leaders():
-    fig = go.Figure()
-    leaders = get_all_leaders()
-    for leader in leaders:
-        assessments = get_leader_assessments(leader["id"])
-        if assessments:
-            current_scores = {
-                "专业技术能力": assessments[0]["professional_skill"],
-                "指标掌控能力": assessments[0]["index_mastery"],
-                "管理执行能力": assessments[0]["management_execution"],
-                "沟通协调能力": assessments[0]["communication_coordination"],
-                "市场营销能力": assessments[0]["marketing_ability"]
-            }
-            fig.add_trace(go.Scatterpolar(
-                r=[current_scores[dim] for dim in DIMENSIONS],
-                theta=DIMENSIONS,
-                fill='toself',
-                name=leader["name"]
-            ))
-    fig.update_layout(
-        polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
-        showlegend=True,
-        title="不同网格长的对比雷达图"
+    # 页面标题和配置
+    st.set_page_config(
+        page_title="网格长评估系统",
+        page_icon="📊",
+        layout="wide"
     )
-    st.plotly_chart(fig, use_container_width=True)
-
-    # 柱状图对比综合得分
-    leader_scores = []
-    for leader in leaders:
-        assessments = get_leader_assessments(leader["id"])
-        if assessments:
-            current_scores = {
-                "专业技术能力": assessments[0]["professional_skill"],
-                "指标掌控能力": assessments[0]["index_mastery"],
-                "管理执行能力": assessments[0]["management_execution"],
-                "沟通协调能力": assessments[0]["communication_coordination"],
-                "市场营销能力": assessments[0]["marketing_ability"]
-            }
-            total_score = sum(
-                current_scores[dim] * WEIGHTS[dim]
-                for dim in DIMENSIONS
-            )
-            leader_scores.append({
-                "name": leader["name"],
-                "score": total_score
-            })
-    score_df = pd.DataFrame(leader_scores)
-    fig_bar = px.bar(score_df, x="name", y="score", title="不同网格长综合得分对比")
-    st.plotly_chart(fig_bar, use_container_width=True)
-
-
-# 智能诊断报告
-def generate_report():
-    buffer = BytesIO()
-    p = canvas.Canvas(buffer, pagesize=letter)
-
-    # 报告标题
-    p.setFont('Helvetica-Bold', 20)
-    p.drawString(100, 750, '乡镇网格长绩效与能力画像评估报告')
-    p.setFont('Helvetica', 12)
-
-    y_position = 700
-    leaders = get_all_leaders()
-    for leader in leaders:
-        assessments = get_leader_assessments(leader["id"])
-        if assessments:
-            current_scores = assessments[0]
-            p.drawString(100, y_position, f"网格长: {leader['name']} - {leader['area']}")
-            y_position -= 20
-
-            # 映射数据库列名到中文维度名称
-            score_mapping = {
-                "专业技术能力": current_scores["professional_skill"],
-                "指标掌控能力": current_scores["index_mastery"],
-                "管理执行能力": current_scores["management_execution"],
-                "沟通协调能力": current_scores["communication_coordination"],
-                "市场营销能力": current_scores["marketing_ability"]
-            }
-
-            # 计算综合得分
-            total_score = sum(
-                score_mapping[dim] * WEIGHTS[dim]
-                for dim in DIMENSIONS
-            )
-            p.drawString(100, y_position, f"综合得分: {total_score:.1f}")
-            y_position -= 20
-
-            for dim in DIMENSIONS:
-                p.drawString(100, y_position, f"{dim}: {score_mapping[dim]}分")
-                y_position -= 20
-            y_position -= 30
-
-    p.save()
-    buffer.seek(0)
-    st.download_button(
-        label="下载PDF评估报告",
-        data=buffer,
-        file_name="评估报告.pdf",
-        mime="application/pdf"
-    )
-
-
-# 移动端适配
-st.write("""
-<style>
-@media (max-width: 600px) {
-    /* 调整侧边栏宽度 */
-    [data-testid="stSidebar"] {
-        width: 100% !important;
-    }
-    /* 调整列布局 */
-    [data-testid="stHorizontalBlock"] {
-        flex-direction: column;
-    }
-    /* 调整图表大小 */
-    [data-testid="stPlotlyChart"] {
-        width: 100% !important;
-    }
-}
-</style>
-""", unsafe_allow_html=True)
-
-# 添加功能按钮
-if st.button("团队对比分析"):
-    compare_leaders()
-
-if st.button("生成智能诊断报告"):
-    generate_report()
-
-
+    st.title("网格长能力评估系统")
+    
+    # 初始化会话状态
+    if 'all_leaders' not in st.session_state:
+        st.session_state.all_leaders = get_all_leaders()
+    
+    # 侧边栏
+    with st.sidebar:
+        # 手动初始化数据库按钮
+        if st.button("手动初始化数据库", key="init_db_button"):
+            init_database()
+            # 初始化成功后检查并清理过期数据
+            if st.session_state.get('database_initialized', False):
+                clear_expired_data()
+            # 刷新网格长列表
+            st.session_state.all_leaders = get_all_leaders(refresh=True)
+        
+        st.header("选择评估周期")
+        selected_date = st.selectbox(
+            "选择评估日期",
+            ["2025年6月", "2025年5月", "2025年4月", "2025年3月"]
+        )
+        
+        st.header("选择网格长")
+        all_leaders = st.session_state.all_leaders
+        leader_names = [leader["name"] for leader in all_leaders]
+        
+        # 处理无网格长数据的情况
+        if not leader_names:
+            st.warning("暂无网格长数据，已添加示例数据")
+            conn = get_db_connection()
+            if conn:
+                try:
+                    cursor = conn.cursor()
+                    # 添加示例网格长
+                    cursor.execute("INSERT OR IGNORE INTO grid_leaders (name, area) VALUES (?, ?)", ("示例网格长", "示例区域"))
+                    conn.commit()
+                    # 刷新缓存
+                    st.session_state.all_leaders = get_all_leaders(refresh=True)
+                    all_leaders = st.session_state.all_leaders
+                    leader_names = [leader["name"] for leader in all_leaders]
+                except Exception as e:
+                    st.error(f"添加示例数据失败: {e}")
+                finally:
+                    conn.close()
+        
+        # 确保下拉菜单使用最新的 leader_names，并处理选择逻辑
+        if 'selected_name' not in st.session_state or st.session_state.selected_name not in leader_names:
+            st.session_state.selected_name = leader_names[0] if leader_names else None
+        
+        selected_name = st.selectbox(
+            "选择网格长姓名",
+            leader_names,
+            index=leader_names.index(st.session_state.selected_name) if st.session_state.selected_name in leader_names else 0,
+            key="leader_selectbox"
+        )
+        st.session_state.selected_name = selected_name
+        
+        # 数据导入模块
+        st.header("数据导入")
+        uploaded_file = st.file_uploader(
+            "上传 xlsx、xls 或 CSV 文件", 
+            type=["xlsx", "xls", "csv"],
+            key="file_uploader"
+        )
+        
+        if uploaded_file is not None:
+            import_data(uploaded_file)
+        
+        # 数据导出模块
+        st.header("数据导出")
+        export_format = st.selectbox("选择导出格式", ["CSV", "Excel"])
+        export_scope = st.selectbox("选择导出范围", ["指定网格长", "所有网格长"])
+        
+        if export_scope == "指定网格长":
+            selected_leader = next((leader for leader in all_leaders if leader["name"] == selected_name), None)
+            if selected_leader:
+                leader_id = selected_leader["id"]
+            else:
+                leader_id = None
+        else:
+            leader_id = None
+        
+        # 导出数据按钮
+        if st.button("导出数据", key="export_data_button"):
+            df = export_assessment_data(leader_id)
+            if df is not None and not df.empty:
+                if export_format == "CSV":
+                    csv = df.to_csv(sep='\t', na_rep='nan')
+                    st.download_button(
+                        label="下载 CSV 文件",
+                        data=csv,
+                        file_name="assessment_data.csv",
+                        mime="text/csv"
+                    )
+                elif export_format == "Excel":
+                    excel_file = to_excel(df)
+                    st.download_button(
+                        label="下载 Excel 文件",
+                        data=excel_file,
+                        file_name="assessment_data.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+            else:
+                st.warning("没有可导出的数据。")
+        
+        # 数据清理模块
+        st.header("数据清理")
+        retention_days = st.number_input("保留数据天数", min_value=1, value=30)
+        if st.button("清理过期数据", key="clear_expired_data_button"):
+            if clear_expired_data(retention_days):
+                st.success(f"成功清理超过 {retention_days} 天的评估数据！")
+                # 刷新评估数据
+                if 'selected_leader' in st.session_state:
+                    st.session_state.selected_leader = None
+            else:
+                st.error("清理过期数据失败，请重试。")
+        
+        if st.button("清空所有数据", key="clear_all_data_button"):
+            if clear_data():
+                st.success("所有数据已成功清空！")
+                # 清空会话状态
+                st.session_state.all_leaders = get_all_leaders()
+                if 'selected_name' in st.session_state:
+                    del st.session_state.selected_name
+            else:
+                st.error("数据清空失败，请重试。")
+        
+        # 数据库备份
+        if st.button("备份数据库", key="backup_db_button"):
+            backup_database()
+    
+    def get_all_leaders_assessments():
+        """获取所有网格长的最新评估数据"""
+        conn = get_db_connection()
+        if conn is None:
+            return []
+        
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT a.*, g.name, g.area 
+                FROM assessments a
+                JOIN grid_leaders g ON a.leader_id = g.id
+                WHERE (a.leader_id, a.date) IN (
+                    SELECT leader_id, MAX(date) 
+                    FROM assessments 
+                    GROUP BY leader_id
+                )
+            """)
+            columns = [col[0] for col in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        except Exception as e:
+            st.error(f"获取所有网格长评估数据失败: {e}")
+            return []
+        finally:
+            if conn:
+                conn.close()
+    
+    # 主界面内容
+    if 'selected_name' in st.session_state and st.session_state.selected_name:
+        selected_leader = next((leader for leader in all_leaders if leader["name"] == st.session_state.selected_name), None)
+        if selected_leader:
+            leader_id = selected_leader["id"]
+            assessments = get_leader_assessments(leader_id)
+    
+            if assessments:
+                # 找到对应日期的评估记录，若无则使用最新记录
+                selected_assessment = next(
+                    (a for a in assessments if a["date"] == selected_date),
+                    assessments[0]
+                )
+    
+                st.subheader(f"网格长: {selected_leader['name']} - {selected_leader['area']}")
+                st.subheader(f"评估日期: {selected_assessment['date']}")
+    
+                # 显示评估分数
+                st.subheader("能力评估分数")
+                col1, col2 = st.columns(2)
+                for i, dim in enumerate(DIMENSIONS):
+                    col = col1 if i < len(DIMENSIONS)/2 else col2
+                    with col:
+                        score = selected_assessment.get(dim_to_db_col[dim], 0)
+                        st.metric(dim, f"{score:.2f}分")
+    
+                # 计算综合得分
+                scores = {dim: selected_assessment.get(dim_to_db_col[dim], 0) for dim in DIMENSIONS}
+                total_score = calculate_total_score(scores, WEIGHTS, DIMENSIONS)
+    
+                st.subheader(f"综合得分: {total_score:.2f}分")
+    
+                # 显示评估等级
+                grade = "优秀" if total_score >= THRESHOLDS["优秀"] else \
+                        "良好" if total_score >= THRESHOLDS["良好"] else \
+                        "合格" if total_score >= THRESHOLDS["合格"] else "待改进"
+                st.subheader(f"评估等级: {grade}")
+    
+                # 显示全量网格分值排名对比
+                all_assessments = get_all_leaders_assessments()
+                all_scores = []
+                for assessment in all_assessments:
+                    scores = {dim: assessment.get(dim_to_db_col[dim], 0) for dim in DIMENSIONS}
+                    total_score = calculate_total_score(scores, WEIGHTS, DIMENSIONS)
+                    all_scores.append({
+                        "姓名": assessment['name'],
+                        "辖区": assessment['area'],
+                        "综合得分": total_score,
+                        "评估等级": "优秀" if total_score >= THRESHOLDS["优秀"] else
+                                  "良好" if total_score >= THRESHOLDS["良好"] else
+                                  "合格" if total_score >= THRESHOLDS["合格"] else "待改进"
+                    })
+    
+                # 按综合得分排序
+                all_scores.sort(key=lambda x: x["综合得分"], reverse=True)
+                # 添加排名列
+                for i, score_info in enumerate(all_scores, start=1):
+                    score_info["排名"] = i
+    
+                st.subheader("全量网格分值排名对比")
+                df = pd.DataFrame(all_scores)
+                # 高亮显示选中的网格长
+                def highlight_selected(s):
+                    if s["姓名"] == selected_leader["name"]:
+                        return ['background-color: yellow'] * len(s)
+                    return [''] * len(s)
+                st.dataframe(df.style.apply(highlight_selected, axis=1))
+    
+                # 显示网格具体得分结果
+                st.subheader("网格具体得分结果")
+                st.write(pd.DataFrame({
+                    "维度": DIMENSIONS,
+                    "得分": [selected_assessment.get(dim_to_db_col[dim], 0) for dim in DIMENSIONS]
+                }))
+            else:
+                st.warning("该网格长暂无评估数据。")
+        else:
+            st.warning("未找到选中的网格长数据。")
+    else:
+        st.info("请在侧边栏选择网格长。")
