@@ -630,7 +630,7 @@ if authentication_status:
         export_scope = st.selectbox("选择导出范围", ["指定网格长", "所有网格长"])
         
         if export_scope == "指定网格长":
-            selected_leader = next((leader for leader in all_leaders if leader["name"] == selected_name), None)
+            selected_leader = next((leader for leader in all_leaders if leader["name"] == st.session_state.selected_name), None)
             if selected_leader:
                 leader_id = selected_leader["id"]
             else:
